@@ -463,20 +463,30 @@ def osm_naar_rijen(elements, fallback_plaats):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def haal_tomtom_palen(lat, lon, api_key, radius_m=25000):
-    """Haalt laadpalen op via de commerciele TomTom Search API (gratis tier)."""
+def haal_tomtom_palen(lat, lon, api_key, radius_m=25000, max_paginas=4):
+    """Haalt laadpalen op via de commerciele TomTom Search API (gratis tier).
+
+    TomTom geeft max 100 resultaten per verzoek; we bladeren door meerdere
+    pagina's zodat ook palen verderop (bv. Ionity Beselare) meekomen.
+    """
     if not api_key:
         return []
     url = "https://api.tomtom.com/search/2/nearbySearch/.json"
-    params = {
-        "key": api_key, "lat": lat, "lon": lon, "radius": radius_m,
-        "categorySet": 7309,   # 7309 = Electric Vehicle Station
-        "limit": 100, "view": "Unified",
-    }
-    r = requests.get(url, params=params,
-                     headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"}, timeout=20)
-    r.raise_for_status()
-    return r.json().get("results", [])
+    alle = []
+    for pagina in range(max_paginas):
+        params = {
+            "key": api_key, "lat": lat, "lon": lon, "radius": radius_m,
+            "categorySet": 7309,   # 7309 = Electric Vehicle Station
+            "limit": 100, "ofs": pagina * 100, "view": "Unified",
+        }
+        r = requests.get(url, params=params,
+                         headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"}, timeout=20)
+        r.raise_for_status()
+        resultaten = r.json().get("results", [])
+        alle.extend(resultaten)
+        if len(resultaten) < 100:      # laatste pagina bereikt
+            break
+    return alle
 
 
 def tomtom_naar_rijen(results, fallback_plaats):
