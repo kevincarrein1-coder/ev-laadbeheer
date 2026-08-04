@@ -302,16 +302,40 @@ with tab1:
 # ===========================================================================
 # TABBLAD 2 — LIVE PRIJSKAART
 # ===========================================================================
-def classificeer_paal(operator, titel):
-    """Bepaalt kleur/categorie o.b.v. operator- en titelnaam."""
+def _max_vermogen(poi):
+    """Hoogste vermogen (kW) van alle connectoren van een paal."""
+    mp = 0.0
+    for c in (poi.get("Connections") or []):
+        p = c.get("PowerKW")
+        try:
+            if p:
+                mp = max(mp, float(p))
+        except (TypeError, ValueError):
+            pass
+    return mp
+
+
+# Bekende snelladernetwerken (DC) en het Electra-eigen netwerk.
+ELECTRA_EIGEN = ("electra",)
+SNELLADER_PARTNERS = ("ionity", "fastned", "atlante", "tesla")
+
+
+def classificeer_paal(operator, titel, max_power):
+    """Categorie + kleur + prijs op basis van netwerk en vermogen.
+
+    - Electra (eigen netwerk)            -> groen, eigen tarief
+    - Ionity/Fastned/Atlante/Tesla (DC)  -> oranje, partner-tarief
+    - Overige DC-snelladers (> 22 kW)    -> rood, partner-tarief
+    - Publieke AC-palen (<= 22 kW)       -> blauw, Radius-tarief
+    """
     tekst = f"{operator} {titel}".lower()
-    if "electra" in tekst:
+    if any(w in tekst for w in ELECTRA_EIGEN):
         return "🟢 Electra", "green", electra_eigen
-    if any(w in tekst for w in ("ionity", "fastned", "atlante")):
+    if any(w in tekst for w in SNELLADER_PARTNERS):
         return "🟠 Electra Partner", "orange", electra_partner
-    if any(w in tekst for w in ("ac", "type 2", "radius", "publiek")):
-        return "🔵 Publieke AC (Radius)", "blue", radius_prijs_incl_btw()
-    return "🔴 Overige DC", "red", electra_partner
+    if max_power and max_power > 22:
+        return "🔴 Overige DC", "red", electra_partner
+    return "🔵 Publieke AC (Radius)", "blue", radius_prijs_incl_btw()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -321,8 +345,8 @@ def haal_laadpalen(lat, lon, api_key):
     params = {
         "output": "json", "countrycode": "BE",
         "latitude": lat, "longitude": lon,
-        "distance": 15, "distanceunit": "KM",
-        "maxresults": 60, "compact": True, "verbose": False,
+        "distance": 25, "distanceunit": "KM",
+        "maxresults": 200, "compact": True, "verbose": False,
     }
     if api_key:
         params["key"] = api_key
@@ -371,11 +395,14 @@ with tab2:
         adres = ", ".join(filter(None, [
             adres_info.get("AddressLine1"), adres_info.get("Town")]))
         operator = (poi.get("OperatorInfo") or {}).get("Title", "") or ""
-        categorie, kleur, prijs = classificeer_paal(operator, titel)
+        max_power = _max_vermogen(poi)
+        categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
         rijen.append({
             "Locatie": titel, "Adres": adres or stad,
             "lat": plat, "lon": plon,
             "Categorie": categorie, "kleur": kleur,
+            "Netwerk": operator or "Onbekend",
+            "kW": round(max_power) if max_power else None,
             "Prijs": prijs,
             "label": f"€{prijs:.2f}",
         })
@@ -391,7 +418,8 @@ with tab2:
             palen_df, lat="lat", lon="lon", text="label",
             color="Categorie", color_discrete_map=kleur_map,
             hover_name="Locatie",
-            hover_data={"Adres": True, "Prijs": ":.2f",
+            hover_data={"Adres": True, "Netwerk": True, "kW": True,
+                        "Prijs": ":.2f",
                         "lat": False, "lon": False, "label": False},
             zoom=11, height=560,
         )
