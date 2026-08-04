@@ -151,18 +151,24 @@ basis_ac_prijs = st.sidebar.number_input(
     min_value=0.0, value=0.35, step=0.01, format="%.2f",
     help="Basistarief vóór Radius-korting en vóór 21% BTW.")
 
-def _ocm_key_uit_secrets():
+def _secret(sectie, sleutel):
     try:
-        key = st.secrets["openchargemap"]["api_key"]
-        return str(key) if key else ""
+        v = st.secrets[sectie][sleutel]
+        return str(v) if v else ""
     except Exception:
         return ""
 
 
 ocm_api_key = st.sidebar.text_input(
     "Open Charge Map API-sleutel", type="password",
-    value=_ocm_key_uit_secrets(),
+    value=_secret("openchargemap", "api_key"),
     help="Wordt automatisch geladen uit Secrets. Gratis sleutel via openchargemap.org.")
+
+tomtom_api_key = st.sidebar.text_input(
+    "TomTom API-sleutel", type="password",
+    value=_secret("tomtom", "api_key"),
+    help="Gratis sleutel via developer.tomtom.com. Voegt actuele, commerciele "
+         "palen toe (inclusief netwerken zoals Electra).")
 
 
 def radius_prijs_incl_btw():
@@ -453,6 +459,58 @@ def osm_naar_rijen(elements, fallback_plaats):
     return rijen
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def haal_tomtom_palen(lat, lon, api_key, radius_m=25000):
+    """Haalt laadpalen op via de commerciele TomTom Search API (gratis tier)."""
+    if not api_key:
+        return []
+    url = "https://api.tomtom.com/search/2/nearbySearch/.json"
+    params = {
+        "key": api_key, "lat": lat, "lon": lon, "radius": radius_m,
+        "categorySet": 7309,   # 7309 = Electric Vehicle Station
+        "limit": 100, "view": "Unified",
+    }
+    r = requests.get(url, params=params,
+                     headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"}, timeout=20)
+    r.raise_for_status()
+    return r.json().get("results", [])
+
+
+def tomtom_naar_rijen(results, fallback_plaats):
+    """Zet ruwe TomTom-resultaten om naar uniforme paalrijen."""
+    rijen = []
+    for res in results:
+        pos = res.get("position") or {}
+        plat, plon = pos.get("lat"), pos.get("lon")
+        if plat is None or plon is None:
+            continue
+        poi = res.get("poi") or {}
+        titel = poi.get("name") or "Laadpaal"
+        brands = poi.get("brands") or []
+        operator = (brands[0].get("name") if brands else "") or ""
+        addr = res.get("address") or {}
+        adres = ", ".join(filter(None, [
+            addr.get("streetName"), addr.get("municipality")]))
+        max_power = 0.0
+        for con in ((res.get("chargingPark") or {}).get("connectors") or []):
+            p = con.get("ratedPowerKW")
+            try:
+                if p:
+                    max_power = max(max_power, float(p))
+            except (TypeError, ValueError):
+                pass
+        categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
+        rijen.append({
+            "Locatie": titel, "Adres": adres or fallback_plaats,
+            "lat": plat, "lon": plon,
+            "Categorie": categorie, "kleur": kleur,
+            "Netwerk": operator or "Onbekend",
+            "kW": round(max_power) if max_power else None,
+            "Prijs": prijs, "label": f"€{prijs:.2f}", "Bron": "TomTom",
+        })
+    return rijen
+
+
 def dedupe_palen(rijen):
     """Verwijdert dubbels (zelfde locatie) op afgeronde coordinaten."""
     gezien, uniek = set(), []
@@ -488,26 +546,38 @@ with tab2:
         st.caption("Tip: voeg het pakket 'streamlit-geolocation' toe voor "
                    "'gebruik mijn locatie'.")
 
-    bron = st.radio("Databron", ["Beide (aanbevolen)", "Open Charge Map",
-                                 "OpenStreetMap"], horizontal=True)
+    bron = st.radio("Databron", ["Alle bronnen (aanbevolen)", "Open Charge Map",
+                                 "OpenStreetMap", "TomTom"], horizontal=True)
+    alle = bron == "Alle bronnen (aanbevolen)"
 
-    ocm_rijen, osm_rijen = [], []
-    if bron in ("Beide (aanbevolen)", "Open Charge Map"):
+    ocm_rijen, osm_rijen, tt_rijen = [], [], []
+    if alle or bron == "Open Charge Map":
         try:
             ocm_rijen = ocm_naar_rijen(haal_laadpalen(lat, lon, ocm_api_key), stad)
         except Exception as e:
             st.warning(f"Open Charge Map niet bereikbaar: {e}")
-    if bron in ("Beide (aanbevolen)", "OpenStreetMap"):
+    if alle or bron == "OpenStreetMap":
         try:
             osm_rijen = osm_naar_rijen(haal_osm_palen(lat, lon), stad)
         except Exception as e:
             st.warning(f"OpenStreetMap niet bereikbaar: {e}")
+    if alle or bron == "TomTom":
+        try:
+            tt_rijen = tomtom_naar_rijen(
+                haal_tomtom_palen(lat, lon, tomtom_api_key), stad)
+        except Exception as e:
+            st.warning(f"TomTom niet bereikbaar: {e}")
 
-    palen_df = pd.DataFrame(dedupe_palen(ocm_rijen + osm_rijen))
+    if (alle or bron == "TomTom") and not tomtom_api_key:
+        st.info("Voeg een TomTom-sleutel toe (zijbalk of Secrets) voor de meest "
+                "complete, actuele palen zoals nieuwe Electra-snelladers.")
+
+    palen_df = pd.DataFrame(dedupe_palen(ocm_rijen + osm_rijen + tt_rijen))
     if not palen_df.empty:
         st.caption(f"🔌 {len(palen_df)} unieke palen "
                    f"(Open Charge Map: {len(ocm_rijen)} · "
-                   f"OpenStreetMap: {len(osm_rijen)}).")
+                   f"OpenStreetMap: {len(osm_rijen)} · "
+                   f"TomTom: {len(tt_rijen)}).")
 
     if not palen_df.empty:
         kleur_map = {
