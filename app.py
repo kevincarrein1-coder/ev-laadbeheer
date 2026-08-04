@@ -8,6 +8,7 @@ Starten:
     streamlit run app.py
 """
 
+import re
 from datetime import date, datetime
 from io import BytesIO
 
@@ -356,6 +357,99 @@ def haal_laadpalen(lat, lon, api_key):
     return r.json()
 
 
+def ocm_naar_rijen(data, fallback_plaats):
+    """Zet ruwe Open Charge Map-data om naar uniforme paalrijen."""
+    rijen = []
+    for poi in data:
+        adres_info = poi.get("AddressInfo") or {}
+        plat, plon = adres_info.get("Latitude"), adres_info.get("Longitude")
+        if plat is None or plon is None:
+            continue
+        titel = adres_info.get("Title", "Onbekende paal")
+        adres = ", ".join(filter(None, [
+            adres_info.get("AddressLine1"), adres_info.get("Town")]))
+        operator = (poi.get("OperatorInfo") or {}).get("Title", "") or ""
+        max_power = _max_vermogen(poi)
+        categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
+        rijen.append({
+            "Locatie": titel, "Adres": adres or fallback_plaats,
+            "lat": plat, "lon": plon,
+            "Categorie": categorie, "kleur": kleur,
+            "Netwerk": operator or "Onbekend",
+            "kW": round(max_power) if max_power else None,
+            "Prijs": prijs, "label": f"€{prijs:.2f}", "Bron": "OCM",
+        })
+    return rijen
+
+
+def _osm_vermogen(tags):
+    """Best-effort vermogen (kW) uit diverse OpenStreetMap-tags."""
+    kandidaten = []
+    for k, v in tags.items():
+        if k == "maxpower" or k == "charging_station:output" or k.endswith(":output"):
+            m = re.search(r"(\d+(?:[.,]\d+)?)", str(v))
+            if m:
+                val = float(m.group(1).replace(",", "."))
+                if val > 1000:          # waarde in watt -> kW
+                    val = val / 1000.0
+                kandidaten.append(val)
+    return max(kandidaten) if kandidaten else 0.0
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def haal_osm_palen(lat, lon, radius_m=25000):
+    """Haalt laadpalen op via de gratis, sleutelvrije OpenStreetMap Overpass-API."""
+    query = (
+        "[out:json][timeout:25];"
+        f'nwr["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
+        "out center tags;"
+    )
+    r = requests.post("https://overpass-api.de/api/interpreter",
+                      data={"data": query},
+                      headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
+                      timeout=40)
+    r.raise_for_status()
+    return r.json().get("elements", [])
+
+
+def osm_naar_rijen(elements, fallback_plaats):
+    """Zet ruwe OpenStreetMap-elementen om naar uniforme paalrijen."""
+    rijen = []
+    for el in elements:
+        plat = el.get("lat") or (el.get("center") or {}).get("lat")
+        plon = el.get("lon") or (el.get("center") or {}).get("lon")
+        if plat is None or plon is None:
+            continue
+        tags = el.get("tags") or {}
+        operator = tags.get("network") or tags.get("operator") or ""
+        titel = tags.get("name") or operator or "Laadpaal"
+        adres = ", ".join(filter(None, [
+            tags.get("addr:street"), tags.get("addr:city")]))
+        max_power = _osm_vermogen(tags)
+        categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
+        rijen.append({
+            "Locatie": titel, "Adres": adres or fallback_plaats,
+            "lat": plat, "lon": plon,
+            "Categorie": categorie, "kleur": kleur,
+            "Netwerk": operator or "Onbekend",
+            "kW": round(max_power) if max_power else None,
+            "Prijs": prijs, "label": f"€{prijs:.2f}", "Bron": "OSM",
+        })
+    return rijen
+
+
+def dedupe_palen(rijen):
+    """Verwijdert dubbels (zelfde locatie) op afgeronde coordinaten."""
+    gezien, uniek = set(), []
+    for r in rijen:
+        sleutel = (round(float(r["lat"]), 4), round(float(r["lon"]), 4))
+        if sleutel in gezien:
+            continue
+        gezien.add(sleutel)
+        uniek.append(r)
+    return uniek
+
+
 with tab2:
     st.header("Live Prijskaart")
 
@@ -379,35 +473,26 @@ with tab2:
         st.caption("Tip: voeg het pakket 'streamlit-geolocation' toe voor "
                    "'gebruik mijn locatie'.")
 
-    try:
-        data = haal_laadpalen(lat, lon, ocm_api_key)
-    except Exception as e:
-        data = []
-        st.error(f"Kon Open Charge Map niet bereiken: {e}")
+    bron = st.radio("Databron", ["Beide (aanbevolen)", "Open Charge Map",
+                                 "OpenStreetMap"], horizontal=True)
 
-    rijen = []
-    for poi in data:
-        adres_info = poi.get("AddressInfo") or {}
-        plat, plon = adres_info.get("Latitude"), adres_info.get("Longitude")
-        if plat is None or plon is None:
-            continue
-        titel = adres_info.get("Title", "Onbekende paal")
-        adres = ", ".join(filter(None, [
-            adres_info.get("AddressLine1"), adres_info.get("Town")]))
-        operator = (poi.get("OperatorInfo") or {}).get("Title", "") or ""
-        max_power = _max_vermogen(poi)
-        categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
-        rijen.append({
-            "Locatie": titel, "Adres": adres or stad,
-            "lat": plat, "lon": plon,
-            "Categorie": categorie, "kleur": kleur,
-            "Netwerk": operator or "Onbekend",
-            "kW": round(max_power) if max_power else None,
-            "Prijs": prijs,
-            "label": f"€{prijs:.2f}",
-        })
+    ocm_rijen, osm_rijen = [], []
+    if bron in ("Beide (aanbevolen)", "Open Charge Map"):
+        try:
+            ocm_rijen = ocm_naar_rijen(haal_laadpalen(lat, lon, ocm_api_key), stad)
+        except Exception as e:
+            st.warning(f"Open Charge Map niet bereikbaar: {e}")
+    if bron in ("Beide (aanbevolen)", "OpenStreetMap"):
+        try:
+            osm_rijen = osm_naar_rijen(haal_osm_palen(lat, lon), stad)
+        except Exception as e:
+            st.warning(f"OpenStreetMap niet bereikbaar: {e}")
 
-    palen_df = pd.DataFrame(rijen)
+    palen_df = pd.DataFrame(dedupe_palen(ocm_rijen + osm_rijen))
+    if not palen_df.empty:
+        st.caption(f"🔌 {len(palen_df)} unieke palen "
+                   f"(Open Charge Map: {len(ocm_rijen)} · "
+                   f"OpenStreetMap: {len(osm_rijen)}).")
 
     if not palen_df.empty:
         kleur_map = {
@@ -419,7 +504,7 @@ with tab2:
             color="Categorie", color_discrete_map=kleur_map,
             hover_name="Locatie",
             hover_data={"Adres": True, "Netwerk": True, "kW": True,
-                        "Prijs": ":.2f",
+                        "Bron": True, "Prijs": ":.2f",
                         "lat": False, "lon": False, "label": False},
             zoom=11, height=560,
         )
