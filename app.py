@@ -415,7 +415,7 @@ OVERPASS_SERVERS = [
 def haal_osm_palen(lat, lon, radius_m=25000):
     """Haalt laadpalen op via de gratis, sleutelvrije OpenStreetMap Overpass-API."""
     query = (
-        "[out:json][timeout:60];"
+        "[out:json][timeout:25];"
         f'nwr["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
         "out center tags;"
     )
@@ -424,7 +424,7 @@ def haal_osm_palen(lat, lon, radius_m=25000):
         try:
             r = requests.post(server, data={"data": query},
                               headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
-                              timeout=60)
+                              timeout=25)
             r.raise_for_status()
             return r.json().get("elements", [])
         except Exception as e:      # server traag/onbereikbaar -> volgende proberen
@@ -549,24 +549,29 @@ with tab2:
     bron = st.radio("Databron", ["Alle bronnen (aanbevolen)", "Open Charge Map",
                                  "OpenStreetMap", "TomTom"], horizontal=True)
     alle = bron == "Alle bronnen (aanbevolen)"
+    # Coordinaten afronden (~100 m): kleine GPS-variatie hergebruikt de cache
+    # i.p.v. bij elke klik opnieuw alle bronnen te bevragen.
+    qlat, qlon = round(lat, 3), round(lon, 3)
 
     ocm_rijen, osm_rijen, tt_rijen = [], [], []
-    if alle or bron == "Open Charge Map":
-        try:
-            ocm_rijen = ocm_naar_rijen(haal_laadpalen(lat, lon, ocm_api_key), stad)
-        except Exception as e:
-            st.warning(f"Open Charge Map niet bereikbaar: {e}")
-    if alle or bron == "OpenStreetMap":
-        try:
-            osm_rijen = osm_naar_rijen(haal_osm_palen(lat, lon), stad)
-        except Exception as e:
-            st.warning(f"OpenStreetMap niet bereikbaar: {e}")
-    if alle or bron == "TomTom":
-        try:
-            tt_rijen = tomtom_naar_rijen(
-                haal_tomtom_palen(lat, lon, tomtom_api_key), stad)
-        except Exception as e:
-            st.warning(f"TomTom niet bereikbaar: {e}")
+    with st.spinner("Laadpalen laden uit de gekozen bronnen…"):
+        if alle or bron == "Open Charge Map":
+            try:
+                ocm_rijen = ocm_naar_rijen(
+                    haal_laadpalen(qlat, qlon, ocm_api_key), stad)
+            except Exception as e:
+                st.warning(f"Open Charge Map niet bereikbaar: {e}")
+        if alle or bron == "OpenStreetMap":
+            try:
+                osm_rijen = osm_naar_rijen(haal_osm_palen(qlat, qlon), stad)
+            except Exception as e:
+                st.warning(f"OpenStreetMap niet bereikbaar: {e}")
+        if alle or bron == "TomTom":
+            try:
+                tt_rijen = tomtom_naar_rijen(
+                    haal_tomtom_palen(qlat, qlon, tomtom_api_key), stad)
+            except Exception as e:
+                st.warning(f"TomTom niet bereikbaar: {e}")
 
     if (alle or bron == "TomTom") and not tomtom_api_key:
         st.info("Voeg een TomTom-sleutel toe (zijbalk of Secrets) voor de meest "
