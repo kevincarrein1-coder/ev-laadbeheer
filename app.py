@@ -412,19 +412,22 @@ OVERPASS_SERVERS = [
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def haal_osm_palen(lat, lon, radius_m=25000):
-    """Haalt laadpalen op via de gratis, sleutelvrije OpenStreetMap Overpass-API."""
+def haal_osm_palen(lat, lon, radius_m=20000):
+    """Haalt laadpalen op via de gratis, sleutelvrije OpenStreetMap Overpass-API.
+
+    Alleen 'node'-objecten (verreweg de meeste laadpalen) -> veel snellere query.
+    """
     query = (
-        "[out:json][timeout:25];"
-        f'nwr["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
-        "out center tags;"
+        "[out:json][timeout:20];"
+        f'node["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
+        "out;"
     )
     laatste_fout = None
     for server in OVERPASS_SERVERS:
         try:
             r = requests.post(server, data={"data": query},
                               headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
-                              timeout=25)
+                              timeout=20)
             r.raise_for_status()
             return r.json().get("elements", [])
         except Exception as e:      # server traag/onbereikbaar -> volgende proberen
@@ -549,9 +552,9 @@ with tab2:
     bron = st.radio("Databron", ["Alle bronnen (aanbevolen)", "Open Charge Map",
                                  "OpenStreetMap", "TomTom"], horizontal=True)
     alle = bron == "Alle bronnen (aanbevolen)"
-    # Coordinaten afronden (~100 m): kleine GPS-variatie hergebruikt de cache
-    # i.p.v. bij elke klik opnieuw alle bronnen te bevragen.
-    qlat, qlon = round(lat, 3), round(lon, 3)
+    # Coordinaten grof afronden (~1 km): binnen die straal wordt de al opgehaalde
+    # data hergebruikt i.p.v. bij elke locatieklik opnieuw alle bronnen te bevragen.
+    qlat, qlon = round(lat, 2), round(lon, 2)
 
     ocm_rijen, osm_rijen, tt_rijen = [], [], []
     with st.spinner("Laadpalen laden uit de gekozen bronnen…"):
