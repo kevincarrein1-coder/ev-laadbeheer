@@ -17,6 +17,14 @@ import requests
 import sqlalchemy as sa
 import streamlit as st
 
+# Optioneel: browser-geolocatie ("gebruik mijn locatie"). Werkt alleen als het
+# pakket streamlit-geolocation geinstalleerd is (zie requirements.txt).
+try:
+    from streamlit_geolocation import streamlit_geolocation
+    HEEFT_GEOLOCATIE = True
+except Exception:
+    HEEFT_GEOLOCATIE = False
+
 # ---------------------------------------------------------------------------
 # VASTE AUTO-INSTELLINGEN
 # ---------------------------------------------------------------------------
@@ -110,6 +118,8 @@ init_db()
 # Sessie-state initialiseren (voor doorsturen paal van kaart -> logformulier)
 st.session_state.setdefault("geselecteerde_locatie", "")
 st.session_state.setdefault("geselecteerd_adres", "")
+st.session_state.setdefault("geselecteerd_tarief", None)
+st.session_state.setdefault("geselecteerde_categorie", "")
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +150,18 @@ basis_ac_prijs = st.sidebar.number_input(
     min_value=0.0, value=0.35, step=0.01, format="%.2f",
     help="Basistarief vóór Radius-korting en vóór 21% BTW.")
 
+def _ocm_key_uit_secrets():
+    try:
+        key = st.secrets["openchargemap"]["api_key"]
+        return str(key) if key else ""
+    except Exception:
+        return ""
+
+
 ocm_api_key = st.sidebar.text_input(
-    "Open Charge Map API-sleutel (optioneel)", type="password",
-    help="Gratis sleutel via openchargemap.org verhoogt de betrouwbaarheid van de kaart.")
+    "Open Charge Map API-sleutel", type="password",
+    value=_ocm_key_uit_secrets(),
+    help="Wordt automatisch geladen uit Secrets. Gratis sleutel via openchargemap.org.")
 
 
 def radius_prijs_incl_btw():
@@ -323,6 +342,19 @@ with tab2:
     if c2.button("🔄 Laadpalen laden / vernieuwen", use_container_width=True):
         st.cache_data.clear()
 
+    # Eigen locatie: zoekt de dichtstbijzijnde palen rond jou i.p.v. rond de stad.
+    if HEEFT_GEOLOCATIE:
+        st.caption("📍 Of gebruik je eigen locatie — klik op het locatie-icoon "
+                   "en sta toegang toe:")
+        eigen = streamlit_geolocation()
+        if eigen and eigen.get("latitude") and eigen.get("longitude"):
+            lat, lon = eigen["latitude"], eigen["longitude"]
+            st.success(f"Eigen locatie gebruikt ({lat:.4f}, {lon:.4f}) — "
+                       "palen worden rond jou gezocht.")
+    else:
+        st.caption("Tip: voeg het pakket 'streamlit-geolocation' toe voor "
+                   "'gebruik mijn locatie'.")
+
     try:
         data = haal_laadpalen(lat, lon, ocm_api_key)
     except Exception as e:
@@ -397,7 +429,10 @@ with tab2:
                      use_container_width=True):
             st.session_state["geselecteerde_locatie"] = gekozen["Locatie"]
             st.session_state["geselecteerd_adres"] = gekozen["Adres"]
-            st.success("Paal doorgestuurd naar tabblad '📝 Laadsessie Loggen'.")
+            st.session_state["geselecteerd_tarief"] = float(gekozen["Prijs"])
+            st.session_state["geselecteerde_categorie"] = gekozen["Categorie"]
+            st.success("Paal + tarief doorgestuurd naar tabblad "
+                       "'📝 Laadsessie Loggen'.")
     else:
         st.info("Geen laadpalen gevonden. Probeer een andere stad of voeg een API-sleutel toe.")
 
@@ -421,14 +456,32 @@ with tab3:
     start_pct = b1.slider("Startpercentage batterij (%)", 0, 100, 20)
     eind_pct = b2.slider("Eindpercentage batterij (%)", 0, 100, 80)
 
-    methode = st.selectbox("Laadmethode",
-                           ["Radius Fleetpass", "Electra Kaart", "Smappee (Werk)"])
+    # Best passende laadmethode voorstellen op basis van de gekozen paal.
+    methode_opties = ["Radius Fleetpass", "Electra Kaart", "Smappee (Werk)"]
+    cat = st.session_state.get("geselecteerde_categorie", "")
+    if "Radius" in cat:
+        methode_idx = 0            # Publieke AC (Radius)
+    elif "Electra" in cat:
+        methode_idx = 1            # Electra (eigen of partner)
+    else:
+        methode_idx = 0
+    methode = st.selectbox("Laadmethode", methode_opties, index=methode_idx)
     standaard_tarief = prijs_voor_methode(methode)
 
     geladen_kwh = max(0.0, (eind_pct - start_pct) / 100 * BATTERIJ_CAPACITEIT)
+
+    # Als er via de kaart een paal is gekozen, neemt die prijs de standaard over.
+    kaart_tarief = st.session_state.get("geselecteerd_tarief")
+    if kaart_tarief is not None:
+        default_tarief = float(kaart_tarief)
+        st.caption(f"💡 Tarief automatisch overgenomen van de gekozen paal "
+                   f"(€ {default_tarief:.3f}/kWh). Je kunt het hieronder aanpassen.")
+    else:
+        default_tarief = float(standaard_tarief)
+
     toegepast_tarief = st.number_input(
         "Toegepast tarief (€/kWh) — handmatig aanpasbaar",
-        min_value=0.0, value=round(float(standaard_tarief), 3),
+        min_value=0.0, value=round(default_tarief, 3),
         step=0.01, format="%.3f")
     reele_kosten = geladen_kwh * toegepast_tarief
 
@@ -473,6 +526,8 @@ with tab3:
                 # Selectie wissen na opslaan
                 st.session_state["geselecteerde_locatie"] = ""
                 st.session_state["geselecteerd_adres"] = ""
+                st.session_state["geselecteerd_tarief"] = None
+                st.session_state["geselecteerde_categorie"] = ""
                 st.success(
                     f"Sessie opgeslagen: {geladen_kwh:.1f} kWh · "
                     f"€ {reele_kosten:.2f} · {int(km_in):,} km".replace(",", "."))
