@@ -383,7 +383,7 @@ def ocm_naar_rijen(data, fallback_plaats):
             "Categorie": categorie, "kleur": kleur,
             "Netwerk": operator or "Onbekend",
             "kW": round(max_power) if max_power else None,
-            "Prijs": prijs, "label": f"€{prijs:.2f}", "Bron": "OCM",
+            "Prijs": prijs, "label": f"≈€{prijs:.2f}", "Bron": "OCM",
         })
     return rijen
 
@@ -457,7 +457,7 @@ def osm_naar_rijen(elements, fallback_plaats):
             "Categorie": categorie, "kleur": kleur,
             "Netwerk": operator or "Onbekend",
             "kW": round(max_power) if max_power else None,
-            "Prijs": prijs, "label": f"€{prijs:.2f}", "Bron": "OSM",
+            "Prijs": prijs, "label": f"≈€{prijs:.2f}", "Bron": "OSM",
         })
     return rijen
 
@@ -519,7 +519,7 @@ def tomtom_naar_rijen(results, fallback_plaats):
             "Categorie": categorie, "kleur": kleur,
             "Netwerk": operator or "Onbekend",
             "kW": round(max_power) if max_power else None,
-            "Prijs": prijs, "label": f"€{prijs:.2f}", "Bron": "TomTom",
+            "Prijs": prijs, "label": f"≈€{prijs:.2f}", "Bron": "TomTom",
         })
     return rijen
 
@@ -597,10 +597,23 @@ with tab2:
 
     palen_df = pd.DataFrame(dedupe_palen(ocm_rijen + osm_rijen + tt_rijen))
     if not palen_df.empty:
-        st.caption(f"🔌 {len(palen_df)} unieke palen "
+        totaal = len(palen_df)
+        f1, f2 = st.columns([2, 1])
+        zoek = f1.text_input("🔎 Zoek op naam, netwerk of plaats "
+                             "(bv. 'Ionity' of 'Beselare')", "")
+        cats = sorted(palen_df["Categorie"].unique())
+        gekozen_cats = f2.multiselect("Toon categorieen", cats, default=cats)
+        if zoek:
+            z = zoek.lower()
+            palen_df = palen_df[palen_df.apply(
+                lambda r: z in f"{r['Locatie']} {r['Netwerk']} {r['Adres']}".lower(),
+                axis=1)]
+        if gekozen_cats:
+            palen_df = palen_df[palen_df["Categorie"].isin(gekozen_cats)]
+        st.caption(f"🔌 {len(palen_df)} van {totaal} palen getoond "
                    f"(Open Charge Map: {len(ocm_rijen)} · "
-                   f"OpenStreetMap: {len(osm_rijen)} · "
-                   f"TomTom: {len(tt_rijen)}).")
+                   f"OpenStreetMap: {len(osm_rijen)} · TomTom: {len(tt_rijen)}). "
+                   f"Prijzen zijn een schatting o.b.v. jouw eigen tarieven.")
 
     if not palen_df.empty:
         kleur_map = {
