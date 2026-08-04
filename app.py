@@ -346,14 +346,14 @@ def classificeer_paal(operator, titel, max_power):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def haal_laadpalen(lat, lon, api_key):
+def haal_laadpalen(lat, lon, api_key, radius_km=25):
     """Haalt openbare laadpalen op via de gratis Open Charge Map API."""
     url = "https://api.openchargemap.io/v3/poi/"
     params = {
         "output": "json", "countrycode": "BE",
         "latitude": lat, "longitude": lon,
-        "distance": 25, "distanceunit": "KM",
-        "maxresults": 200, "compact": True, "verbose": False,
+        "distance": radius_km, "distanceunit": "KM",
+        "maxresults": 500, "compact": True, "verbose": False,
     }
     if api_key:
         params["key"] = api_key
@@ -561,28 +561,33 @@ with tab2:
 
     bron = st.radio("Databron", ["Alle bronnen (aanbevolen)", "Open Charge Map",
                                  "OpenStreetMap", "TomTom"], horizontal=True)
+    straal_km = st.slider("Zoekstraal (km)", min_value=5, max_value=50,
+                          value=25, step=5,
+                          help="Groter = ruimer zoekgebied, maar iets trager laden.")
     alle = bron == "Alle bronnen (aanbevolen)"
     # Coordinaten grof afronden (~1 km): binnen die straal wordt de al opgehaalde
     # data hergebruikt i.p.v. bij elke locatieklik opnieuw alle bronnen te bevragen.
     qlat, qlon = round(lat, 2), round(lon, 2)
+    straal_m = straal_km * 1000
 
     ocm_rijen, osm_rijen, tt_rijen = [], [], []
     with st.spinner("Laadpalen laden uit de gekozen bronnen…"):
         if alle or bron == "Open Charge Map":
             try:
                 ocm_rijen = ocm_naar_rijen(
-                    haal_laadpalen(qlat, qlon, ocm_api_key), stad)
+                    haal_laadpalen(qlat, qlon, ocm_api_key, straal_km), stad)
             except Exception as e:
                 st.warning(f"Open Charge Map niet bereikbaar: {e}")
         if alle or bron == "OpenStreetMap":
             try:
-                osm_rijen = osm_naar_rijen(haal_osm_palen(qlat, qlon), stad)
+                osm_rijen = osm_naar_rijen(
+                    haal_osm_palen(qlat, qlon, straal_m), stad)
             except Exception as e:
                 st.warning(f"OpenStreetMap niet bereikbaar: {e}")
         if alle or bron == "TomTom":
             try:
                 tt_rijen = tomtom_naar_rijen(
-                    haal_tomtom_palen(qlat, qlon, tomtom_api_key), stad)
+                    haal_tomtom_palen(qlat, qlon, tomtom_api_key, straal_m), stad)
             except Exception as e:
                 st.warning(f"TomTom niet bereikbaar: {e}")
 
