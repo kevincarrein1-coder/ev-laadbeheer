@@ -396,20 +396,35 @@ def _osm_vermogen(tags):
     return max(kandidaten) if kandidaten else 0.0
 
 
+# Meerdere Overpass-servers: als de eerste traag/overbelast is, probeert de app
+# automatisch de volgende. overpass-api.de is vaak druk, mirrors zijn sneller.
+OVERPASS_SERVERS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def haal_osm_palen(lat, lon, radius_m=25000):
     """Haalt laadpalen op via de gratis, sleutelvrije OpenStreetMap Overpass-API."""
     query = (
-        "[out:json][timeout:25];"
+        "[out:json][timeout:60];"
         f'nwr["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
         "out center tags;"
     )
-    r = requests.post("https://overpass-api.de/api/interpreter",
-                      data={"data": query},
-                      headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
-                      timeout=40)
-    r.raise_for_status()
-    return r.json().get("elements", [])
+    laatste_fout = None
+    for server in OVERPASS_SERVERS:
+        try:
+            r = requests.post(server, data={"data": query},
+                              headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
+                              timeout=60)
+            r.raise_for_status()
+            return r.json().get("elements", [])
+        except Exception as e:      # server traag/onbereikbaar -> volgende proberen
+            laatste_fout = e
+            continue
+    raise RuntimeError(f"Alle OpenStreetMap-servers gaven een fout: {laatste_fout}")
 
 
 def osm_naar_rijen(elements, fallback_plaats):
