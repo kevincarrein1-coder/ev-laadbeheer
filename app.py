@@ -170,6 +170,12 @@ tomtom_api_key = st.sidebar.text_input(
     help="Gratis sleutel via developer.tomtom.com. Voegt actuele, commerciele "
          "palen toe (inclusief netwerken zoals Electra).")
 
+opendata_url = st.sidebar.text_input(
+    "Open-data laadpalen (OpenDataSoft records-URL)",
+    value=_secret("opendata", "records_url"),
+    help="Optioneel. Plak de v2.1 'records'-URL van een OpenDataSoft-laadpaal"
+         "dataset (bv. Vlaanderen WEWIS). Laat leeg om uit te schakelen.")
+
 
 def radius_prijs_incl_btw():
     """(Basis_AC_Prijs * (1 - Korting/100)) * 1.21"""
@@ -524,6 +530,113 @@ def tomtom_naar_rijen(results, fallback_plaats):
     return rijen
 
 
+def _kies_latlon(a, b):
+    """Belgie: lat ~49-52, lon ~2-7. Wijs de twee getallen correct toe."""
+    for la, lo in ((a, b), (b, a)):
+        if 49 <= la <= 52 and 2 <= lo <= 7:
+            return la, lo
+    return a, b
+
+
+def _od_coords(rec):
+    """Zoekt coordinaten in een OpenDataSoft-record (dict / lijst / string)."""
+    for k, v in rec.items():
+        if v is None:
+            continue
+        if isinstance(v, dict) and ("lat" in v or "latitude" in v):
+            la = v.get("lat", v.get("latitude"))
+            lo = v.get("lon", v.get("longitude"))
+            if la is not None and lo is not None:
+                return _kies_latlon(float(la), float(lo))
+        if isinstance(v, (list, tuple)) and len(v) == 2 and "geo" in k.lower():
+            try:
+                return _kies_latlon(float(v[0]), float(v[1]))
+            except (TypeError, ValueError):
+                pass
+        if isinstance(v, str) and ("geo" in k.lower() or "punt" in k.lower()
+                                   or "coord" in k.lower()):
+            getallen = re.findall(r"-?\d+\.\d+", v)
+            if len(getallen) >= 2:
+                return _kies_latlon(float(getallen[0]), float(getallen[1]))
+    return None, None
+
+
+def _od_veld(rec, sleutels):
+    """Eerste veld waarvan de naam een van de sleutels bevat, met inhoud."""
+    for k, v in rec.items():
+        kl = k.lower()
+        if any(s in kl for s in sleutels) and isinstance(v, (str, int, float)) and v != "":
+            return v
+    return None
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def haal_opendata_palen(records_url, lat, lon, radius_m):
+    """Haalt laadpalen op via een OpenDataSoft-dataset (bv. Vlaanderen WEWIS)."""
+    if not records_url:
+        return []
+    base = records_url.split("?")[0]
+    punt = f"geom'POINT({lon} {lat})'"
+    for geo_veld in ("geo_point_2d", "geopunt", "location", "geo_shape", "the_geom"):
+        params = {"limit": 100,
+                  "where": f"within_distance({geo_veld}, {punt}, {radius_m}m)"}
+        try:
+            r = requests.get(base, params=params,
+                             headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
+                             timeout=20)
+            if r.status_code == 200:
+                res = r.json().get("results", [])
+                if res:
+                    return res
+        except Exception:
+            continue
+    # Laatste poging zonder geo-filter (client-side afstand toepassen we niet;
+    # levert de eerste 100 records van de dataset).
+    try:
+        r = requests.get(base, params={"limit": 100},
+                         headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"}, timeout=20)
+        r.raise_for_status()
+        return r.json().get("results", [])
+    except Exception:
+        return []
+
+
+def opendata_naar_rijen(records, fallback_plaats):
+    """Zet OpenDataSoft-records om naar uniforme paalrijen."""
+    rijen = []
+    for rec in records:
+        plat, plon = _od_coords(rec)
+        if plat is None:
+            continue
+        operator = _od_veld(rec, ("operator", "exploitant", "beheerder", "cpo",
+                                  "netwerk", "network")) or ""
+        titel = _od_veld(rec, ("name", "naam", "label", "adres", "straat",
+                               "street")) or operator or "Laadpaal"
+        adres = _od_veld(rec, ("gemeente", "municipality", "city", "stad",
+                               "plaats")) or ""
+        max_power = 0.0
+        pv = _od_veld(rec, ("power", "vermogen", "max_power", "charging_power",
+                            "kw"))
+        if pv is not None:
+            m = re.search(r"(\d+(?:[.,]\d+)?)", str(pv))
+            if m:
+                val = float(m.group(1).replace(",", "."))
+                if val > 1000:
+                    val /= 1000.0
+                max_power = val
+        categorie, kleur, prijs = classificeer_paal(str(operator), str(titel),
+                                                     max_power)
+        rijen.append({
+            "Locatie": str(titel), "Adres": str(adres) or fallback_plaats,
+            "lat": plat, "lon": plon,
+            "Categorie": categorie, "kleur": kleur,
+            "Netwerk": str(operator) or "Onbekend",
+            "kW": round(max_power) if max_power else None,
+            "Prijs": prijs, "label": f"≈€{prijs:.2f}", "Bron": "Open data",
+        })
+    return rijen
+
+
 def dedupe_palen(rijen):
     """Verwijdert dubbels (zelfde locatie) op afgeronde coordinaten."""
     gezien, uniek = set(), []
@@ -538,6 +651,24 @@ def dedupe_palen(rijen):
 
 with tab2:
     st.header("Live Prijskaart")
+
+    with st.expander("🔗 Officiele netwerk-kaarten (volledig) — Electra, Radius, "
+                     "PlugShare, Chargemap"):
+        st.write("Deze kaart bundelt gratis bronnen (Open Charge Map, "
+                 "OpenStreetMap, TomTom) en is niet 100% volledig. Voor de "
+                 "volledige, actuele dekking van een netwerk open je hun eigen "
+                 "kaart of app:")
+        lk1, lk2 = st.columns(2)
+        lk1.link_button("⚡ Electra-kaart", "https://stations.go-electra.com/",
+                        use_container_width=True)
+        lk2.link_button("🟦 Radius e-route (Fleetpass)",
+                        "https://www.radius.com/nl-be/tankkaarten/fleetpass/europe/",
+                        use_container_width=True)
+        lk3, lk4 = st.columns(2)
+        lk3.link_button("🅿️ PlugShare — alle palen",
+                        "https://www.plugshare.com/", use_container_width=True)
+        lk4.link_button("🗺️ Chargemap — alle palen",
+                        "https://chargemap.com/en-us/map", use_container_width=True)
 
     c1, c2 = st.columns([1, 2])
     stad = c1.selectbox("Kies een stad", list(STEDEN.keys()))
@@ -560,7 +691,8 @@ with tab2:
                    "'gebruik mijn locatie'.")
 
     bron = st.radio("Databron", ["Alle bronnen (aanbevolen)", "Open Charge Map",
-                                 "OpenStreetMap", "TomTom"], horizontal=True)
+                                 "OpenStreetMap", "TomTom", "Open data"],
+                    horizontal=True)
     straal_km = st.slider("Zoekstraal (km)", min_value=5, max_value=50,
                           value=25, step=5,
                           help="Groter = ruimer zoekgebied, maar iets trager laden.")
@@ -570,7 +702,7 @@ with tab2:
     qlat, qlon = round(lat, 2), round(lon, 2)
     straal_m = straal_km * 1000
 
-    ocm_rijen, osm_rijen, tt_rijen = [], [], []
+    ocm_rijen, osm_rijen, tt_rijen, od_rijen = [], [], [], []
     with st.spinner("Laadpalen laden uit de gekozen bronnen…"):
         if alle or bron == "Open Charge Map":
             try:
@@ -590,12 +722,22 @@ with tab2:
                     haal_tomtom_palen(qlat, qlon, tomtom_api_key, straal_m), stad)
             except Exception as e:
                 st.warning(f"TomTom niet bereikbaar: {e}")
+        if alle or bron == "Open data":
+            try:
+                od_rijen = opendata_naar_rijen(
+                    haal_opendata_palen(opendata_url, qlat, qlon, straal_m), stad)
+            except Exception as e:
+                st.warning(f"Open data niet bereikbaar: {e}")
 
     if (alle or bron == "TomTom") and not tomtom_api_key:
         st.info("Voeg een TomTom-sleutel toe (zijbalk of Secrets) voor de meest "
                 "complete, actuele palen zoals nieuwe Electra-snelladers.")
+    if bron == "Open data" and not opendata_url:
+        st.info("Plak eerst een OpenDataSoft records-URL in de zijbalk om deze "
+                "bron te gebruiken.")
 
-    palen_df = pd.DataFrame(dedupe_palen(ocm_rijen + osm_rijen + tt_rijen))
+    palen_df = pd.DataFrame(
+        dedupe_palen(ocm_rijen + osm_rijen + tt_rijen + od_rijen))
     if not palen_df.empty:
         totaal = len(palen_df)
         f1, f2 = st.columns([2, 1])
@@ -612,7 +754,8 @@ with tab2:
             palen_df = palen_df[palen_df["Categorie"].isin(gekozen_cats)]
         st.caption(f"🔌 {len(palen_df)} van {totaal} palen getoond "
                    f"(Open Charge Map: {len(ocm_rijen)} · "
-                   f"OpenStreetMap: {len(osm_rijen)} · TomTom: {len(tt_rijen)}). "
+                   f"OpenStreetMap: {len(osm_rijen)} · TomTom: {len(tt_rijen)} · "
+                   f"Open data: {len(od_rijen)}). "
                    f"Prijzen zijn een schatting o.b.v. jouw eigen tarieven.")
 
     if not palen_df.empty:
