@@ -424,7 +424,7 @@ def haal_osm_palen(lat, lon, radius_m=20000):
     Alleen 'node'-objecten (verreweg de meeste laadpalen) -> veel snellere query.
     """
     query = (
-        "[out:json][timeout:20];"
+        "[out:json][timeout:12];"
         f'node["amenity"="charging_station"](around:{radius_m},{lat},{lon});'
         "out;"
     )
@@ -433,7 +433,7 @@ def haal_osm_palen(lat, lon, radius_m=20000):
         try:
             r = requests.post(server, data={"data": query},
                               headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
-                              timeout=20)
+                              timeout=12)
             r.raise_for_status()
             return r.json().get("elements", [])
         except Exception as e:      # server traag/onbereikbaar -> volgende proberen
@@ -583,7 +583,7 @@ def haal_opendata_palen(records_url, lat, lon, radius_m):
         try:
             r = requests.get(base, params=params,
                              headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"},
-                             timeout=20)
+                             timeout=10)
             if r.status_code == 200:
                 res = r.json().get("results", [])
                 if res:
@@ -690,13 +690,13 @@ with tab2:
         st.caption("Tip: voeg het pakket 'streamlit-geolocation' toe voor "
                    "'gebruik mijn locatie'.")
 
-    bron = st.radio("Databron", ["Alle bronnen (aanbevolen)", "Open Charge Map",
-                                 "OpenStreetMap", "TomTom", "Open data"],
-                    horizontal=True)
+    bron = st.radio("Databron", ["TomTom (snel)", "Alle bronnen (compleet, trager)",
+                                 "Open Charge Map", "OpenStreetMap", "Open data"],
+                    horizontal=True, index=0)
     straal_km = st.slider("Zoekstraal (km)", min_value=5, max_value=50,
                           value=25, step=5,
                           help="Groter = ruimer zoekgebied, maar iets trager laden.")
-    alle = bron == "Alle bronnen (aanbevolen)"
+    alle = bron == "Alle bronnen (compleet, trager)"
     # Coordinaten grof afronden (~1 km): binnen die straal wordt de al opgehaalde
     # data hergebruikt i.p.v. bij elke locatieklik opnieuw alle bronnen te bevragen.
     qlat, qlon = round(lat, 2), round(lon, 2)
@@ -716,7 +716,7 @@ with tab2:
                     haal_osm_palen(qlat, qlon, straal_m), stad)
             except Exception as e:
                 st.warning(f"OpenStreetMap niet bereikbaar: {e}")
-        if alle or bron == "TomTom":
+        if alle or bron == "TomTom (snel)":
             try:
                 tt_rijen = tomtom_naar_rijen(
                     haal_tomtom_palen(qlat, qlon, tomtom_api_key, straal_m), stad)
@@ -729,7 +729,7 @@ with tab2:
             except Exception as e:
                 st.warning(f"Open data niet bereikbaar: {e}")
 
-    if (alle or bron == "TomTom") and not tomtom_api_key:
+    if (alle or bron == "TomTom (snel)") and not tomtom_api_key:
         st.info("Voeg een TomTom-sleutel toe (zijbalk of Secrets) voor de meest "
                 "complete, actuele palen zoals nieuwe Electra-snelladers.")
     if bron == "Open data" and not opendata_url:
