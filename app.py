@@ -676,6 +676,7 @@ with tab2:
 
     if c2.button("🔄 Laadpalen laden / vernieuwen", use_container_width=True):
         st.cache_data.clear()
+        st.session_state["kaart_laden"] = True
 
     # Eigen locatie: zoekt de dichtstbijzijnde palen rond jou i.p.v. rond de stad.
     if HEEFT_GEOLOCATIE:
@@ -684,6 +685,7 @@ with tab2:
         eigen = streamlit_geolocation()
         if eigen and eigen.get("latitude") and eigen.get("longitude"):
             lat, lon = eigen["latitude"], eigen["longitude"]
+            st.session_state["kaart_laden"] = True
             st.success(f"Eigen locatie gebruikt ({lat:.4f}, {lon:.4f}) — "
                        "palen worden rond jou gezocht.")
     else:
@@ -703,31 +705,37 @@ with tab2:
     straal_m = straal_km * 1000
 
     ocm_rijen, osm_rijen, tt_rijen, od_rijen = [], [], [], []
-    with st.spinner("Laadpalen laden uit de gekozen bronnen…"):
-        if alle or bron == "Open Charge Map":
-            try:
-                ocm_rijen = ocm_naar_rijen(
-                    haal_laadpalen(qlat, qlon, ocm_api_key, straal_km), stad)
-            except Exception as e:
-                st.warning(f"Open Charge Map niet bereikbaar: {e}")
-        if alle or bron == "OpenStreetMap":
-            try:
-                osm_rijen = osm_naar_rijen(
-                    haal_osm_palen(qlat, qlon, straal_m), stad)
-            except Exception as e:
-                st.warning(f"OpenStreetMap niet bereikbaar: {e}")
-        if alle or bron == "TomTom (snel)":
-            try:
-                tt_rijen = tomtom_naar_rijen(
-                    haal_tomtom_palen(qlat, qlon, tomtom_api_key, straal_m), stad)
-            except Exception as e:
-                st.warning(f"TomTom niet bereikbaar: {e}")
-        if alle or bron == "Open data":
-            try:
-                od_rijen = opendata_naar_rijen(
-                    haal_opendata_palen(opendata_url, qlat, qlon, straal_m), stad)
-            except Exception as e:
-                st.warning(f"Open data niet bereikbaar: {e}")
+    if not st.session_state.get("kaart_laden"):
+        st.info("👆 Kies je databron en zoekstraal, en klik op "
+                "'🔄 Laadpalen laden / vernieuwen' (of gebruik je locatie) om de "
+                "kaart met palen te vullen. Zo start de app snel en laadt hij "
+                "pas palen wanneer jij het vraagt.")
+    else:
+        with st.spinner("Laadpalen laden uit de gekozen bronnen…"):
+            if alle or bron == "Open Charge Map":
+                try:
+                    ocm_rijen = ocm_naar_rijen(
+                        haal_laadpalen(qlat, qlon, ocm_api_key, straal_km), stad)
+                except Exception as e:
+                    st.warning(f"Open Charge Map niet bereikbaar: {e}")
+            if alle or bron == "OpenStreetMap":
+                try:
+                    osm_rijen = osm_naar_rijen(
+                        haal_osm_palen(qlat, qlon, straal_m), stad)
+                except Exception as e:
+                    st.warning(f"OpenStreetMap niet bereikbaar: {e}")
+            if alle or bron == "TomTom (snel)":
+                try:
+                    tt_rijen = tomtom_naar_rijen(
+                        haal_tomtom_palen(qlat, qlon, tomtom_api_key, straal_m), stad)
+                except Exception as e:
+                    st.warning(f"TomTom niet bereikbaar: {e}")
+            if alle or bron == "Open data":
+                try:
+                    od_rijen = opendata_naar_rijen(
+                        haal_opendata_palen(opendata_url, qlat, qlon, straal_m), stad)
+                except Exception as e:
+                    st.warning(f"Open data niet bereikbaar: {e}")
 
     if (alle or bron == "TomTom (snel)") and not tomtom_api_key:
         st.info("Voeg een TomTom-sleutel toe (zijbalk of Secrets) voor de meest "
