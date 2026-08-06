@@ -8,6 +8,7 @@ Starten:
     streamlit run app.py
 """
 
+import math
 import re
 from datetime import date, datetime
 from io import BytesIO
@@ -17,6 +18,7 @@ import plotly.express as px
 import requests
 import sqlalchemy as sa
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Optioneel: browser-geolocatie ("gebruik mijn locatie"). Werkt alleen als het
 # pakket streamlit-geolocation geinstalleerd is (zie requirements.txt).
@@ -42,6 +44,57 @@ STEDEN = {
 
 st.set_page_config(page_title="EV-Laadbeheer BYD Sealion 7",
                    page_icon="⚡", layout="wide")
+
+
+# ---------------------------------------------------------------------------
+# GROTE CLUSTERKAART (Mapbox GL): rendert tienduizenden palen vloeiend.
+# Data komt uit een vooraf gemaakt GeoJSON (fetch_charging_data.py), zodat de
+# server licht blijft en het clusteren in de browser gebeurt.
+# ---------------------------------------------------------------------------
+MAPBOX_HTML = """
+<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<style>html,body{margin:0;height:100%}#map{position:absolute;inset:0}
+.mapboxgl-popup-content{font:13px system-ui}</style></head>
+<body><div id="map"></div><script>
+mapboxgl.accessToken='__TOKEN__';
+const map=new mapboxgl.Map({container:'map',style:'mapbox://styles/mapbox/light-v11',
+ center:[4.7,51.0],zoom:6});
+map.addControl(new mapboxgl.NavigationControl(),'top-right');
+map.addControl(new mapboxgl.GeolocateControl({positionOptions:{enableHighAccuracy:true},
+ trackUserLocation:true}),'top-right');
+map.on('load',()=>{
+ map.addSource('p',{type:'geojson',data:'__GEOJSON__',cluster:true,
+  clusterMaxZoom:14,clusterRadius:50});
+ map.addLayer({id:'cl',type:'circle',source:'p',filter:['has','point_count'],
+  paint:{'circle-color':['step',['get','point_count'],'#51bbd6',100,'#f1c40f',750,'#e67e22'],
+  'circle-radius':['step',['get','point_count'],16,100,22,750,30],
+  'circle-stroke-width':2,'circle-stroke-color':'#fff'}});
+ map.addLayer({id:'cnt',type:'symbol',source:'p',filter:['has','point_count'],
+  layout:{'text-field':['get','point_count_abbreviated'],'text-size':12}});
+ map.addLayer({id:'pt',type:'circle',source:'p',filter:['!',['has','point_count']],
+  paint:{'circle-color':['get','kleur'],'circle-radius':7,
+  'circle-stroke-width':1.5,'circle-stroke-color':'#fff'}});
+ map.on('click','cl',e=>{const f=map.queryRenderedFeatures(e.point,{layers:['cl']});
+  map.getSource('p').getClusterExpansionZoom(f[0].properties.cluster_id,(er,z)=>{
+   if(er)return;map.easeTo({center:f[0].geometry.coordinates,zoom:z});});});
+ map.on('click','pt',e=>{const p=e.features[0].properties;
+  new mapboxgl.Popup().setLngLat(e.features[0].geometry.coordinates)
+   .setHTML('<b>'+(p.naam||'Laadlocatie')+'</b><br>'+(p.adres||'')+
+    '<br>Status: <b>'+p.status+'</b><br>Vrij: '+p.beschikbaar+'/'+p.totaal+
+    (p.max_kw?' · '+p.max_kw+' kW':'')).addTo(map);});
+ for(const l of ['cl','pt']){map.on('mouseenter',l,()=>map.getCanvas().style.cursor='pointer');
+  map.on('mouseleave',l,()=>map.getCanvas().style.cursor='');}
+});
+</script></body></html>
+"""
+
+
+def render_clusterkaart(token, geojson_url, hoogte=620):
+    """Toont de ingebedde Mapbox GL-clusterkaart in de app."""
+    html = MAPBOX_HTML.replace("__TOKEN__", token).replace("__GEOJSON__", geojson_url)
+    components.html(html, height=hoogte)
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +228,30 @@ opendata_url = st.sidebar.text_input(
     value=_secret("opendata", "records_url"),
     help="Optioneel. Plak de v2.1 'records'-URL van een OpenDataSoft-laadpaal"
          "dataset (bv. Vlaanderen WEWIS). Laat leeg om uit te schakelen.")
+
+ocpi_urls_raw = st.sidebar.text_area(
+    "OCPI locations-URLs (één per regel)",
+    value=_secret("ocpi", "url"),
+    help="Directe OCPI/AFIR JSON-links (bv. van transportdata.be) en/of de "
+         "NDW-feed. Meerdere mogen — één per regel. Vrij toegankelijke links "
+         "werken zonder token.")
+ocpi_urls = [u.strip() for u in (ocpi_urls_raw or "").splitlines() if u.strip()]
+ocpi_token = st.sidebar.text_input(
+    "OCPI-token (optioneel)", type="password", value=_secret("ocpi", "token"),
+    help="Alleen nodig voor feeds die authenticatie vereisen. Laat leeg voor "
+         "vrij toegankelijke JSON-links (dan wordt er geen sleutel meegestuurd).")
+
+st.sidebar.divider()
+st.sidebar.caption("🗺️ Grote clusterkaart (Mapbox)")
+mapbox_token = st.sidebar.text_input(
+    "Mapbox public token", type="password", value=_secret("mapbox", "token"),
+    help="Gratis public token (pk.…) via mapbox.com. Nodig voor de grote "
+         "clusterkaart met alle palen.")
+geojson_url = st.sidebar.text_input(
+    "GeoJSON-URL (charging_stations.geojson)",
+    value=_secret("mapbox", "geojson_url"),
+    help="URL naar het door fetch_charging_data.py gemaakte GeoJSON-bestand, "
+         "bv. de raw.githubusercontent.com-link in je repo.")
 
 
 def radius_prijs_incl_btw():
@@ -495,6 +572,32 @@ def haal_tomtom_palen(lat, lon, api_key, radius_m=25000, max_paginas=4):
     return alle
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def haal_tomtom_beschikbaarheid(avail_id, api_key):
+    """Live vrij/bezet-status van een paal via de TomTom EV Availability API.
+
+    Korte cache (2 min) omdat de status snel verandert.
+    """
+    if not avail_id or not api_key:
+        return None
+    url = "https://api.tomtom.com/search/2/chargingAvailability.json"
+    params = {"key": api_key, "chargingAvailabilityId": avail_id}
+    r = requests.get(url, params=params,
+                     headers={"User-Agent": "EV-Laadbeheer-BYD/1.0"}, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def vat_beschikbaarheid_samen(data):
+    """Telt vrije en totale connectoren op uit een TomTom-availability-antwoord."""
+    vrij, totaal = 0, 0
+    for c in (data or {}).get("connectors", []):
+        totaal += int(c.get("total", 0) or 0)
+        huidig = (c.get("availability") or {}).get("current") or {}
+        vrij += int(huidig.get("available", 0) or 0)
+    return vrij, totaal
+
+
 def tomtom_naar_rijen(results, fallback_plaats):
     """Zet ruwe TomTom-resultaten om naar uniforme paalrijen."""
     rijen = []
@@ -519,6 +622,8 @@ def tomtom_naar_rijen(results, fallback_plaats):
             except (TypeError, ValueError):
                 pass
         categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
+        avail_id = ((res.get("dataSources") or {}).get("chargingAvailability")
+                    or {}).get("id")
         rijen.append({
             "Locatie": titel, "Adres": adres or fallback_plaats,
             "lat": plat, "lon": plon,
@@ -526,6 +631,7 @@ def tomtom_naar_rijen(results, fallback_plaats):
             "Netwerk": operator or "Onbekend",
             "kW": round(max_power) if max_power else None,
             "Prijs": prijs, "label": f"≈€{prijs:.2f}", "Bron": "TomTom",
+            "avail_id": avail_id,
         })
     return rijen
 
@@ -637,6 +743,97 @@ def opendata_naar_rijen(records, fallback_plaats):
     return rijen
 
 
+def _afstand_km(la1, lo1, la2, lo2):
+    """Hemelsbrede afstand (km) tussen twee punten."""
+    la1, lo1, la2, lo2 = map(math.radians, (la1, lo1, la2, lo2))
+    d = 2 * math.asin(math.sqrt(
+        math.sin((la2 - la1) / 2) ** 2
+        + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2))
+    return 6371.0 * d
+
+
+def _ocpi_max_kw(evse):
+    """Hoogste vermogen (kW) over de connectoren van een OCPI-EVSE."""
+    mp = 0.0
+    for con in (evse.get("connectors") or []):
+        v = con.get("max_electric_power", con.get("max_power"))
+        try:
+            v = float(v)
+            if v > 1000:            # watt -> kW
+                v /= 1000.0
+            mp = max(mp, v)
+        except (TypeError, ValueError):
+            continue
+    return mp
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def haal_ocpi_palen(url, token, max_paginas=50):
+    """Haalt alle locaties op uit een OCPI locations-feed (met paginering)."""
+    if not url:
+        return []
+    headers = {"Accept": "application/json",
+               "User-Agent": "EV-Laadbeheer-BYD/1.0"}
+    if token:
+        headers["Authorization"] = f"Token {token}"
+    locaties, volgende, params = [], url, {"limit": 100, "offset": 0}
+    for _ in range(max_paginas):
+        r = requests.get(volgende, headers=headers, params=params, timeout=30)
+        r.raise_for_status()
+        payload = r.json()
+        if isinstance(payload, list):
+            batch = payload
+        elif isinstance(payload.get("data"), list):
+            batch = payload["data"]
+        else:
+            batch = payload.get("locations", []) or []
+        locaties.extend(batch)
+        m = re.search(r'<([^>]+)>\s*;\s*rel="next"', r.headers.get("Link", ""))
+        if m:
+            volgende, params = m.group(1), {}
+        elif params and len(batch) >= params.get("limit", 100):
+            params = {"limit": params["limit"],
+                      "offset": params["offset"] + params["limit"]}
+        else:
+            break
+    return locaties
+
+
+def ocpi_naar_rijen(locaties, lat, lon, radius_m, fallback_plaats):
+    """Filtert OCPI-locaties op afstand en zet ze om naar paalrijen + live status."""
+    rijen = []
+    straal_km = radius_m / 1000.0
+    for loc in locaties:
+        # Flexibel: OCPI gebruikt 'coordinates', maar vang ook varianten op.
+        coord = loc.get("coordinates") or loc.get("coord") or {}
+        try:
+            plat = float(coord.get("latitude", loc.get("latitude")))
+            plon = float(coord.get("longitude", loc.get("longitude")))
+        except (TypeError, ValueError):
+            continue
+        if _afstand_km(lat, lon, plat, plon) > straal_km:
+            continue
+        evses = loc.get("evses") or []
+        totaal = len(evses)
+        vrij = sum(1 for e in evses
+                   if str(e.get("status", "")).upper() == "AVAILABLE")
+        max_power = max((_ocpi_max_kw(e) for e in evses), default=0.0)
+        operator = (loc.get("operator") or {}).get("name", "") or ""
+        titel = loc.get("name") or operator or "Laadlocatie"
+        adres = ", ".join(filter(None, [loc.get("address"), loc.get("city")]))
+        categorie, kleur, prijs = classificeer_paal(operator, titel, max_power)
+        rijen.append({
+            "Locatie": titel, "Adres": adres or fallback_plaats,
+            "lat": plat, "lon": plon,
+            "Categorie": categorie, "kleur": kleur,
+            "Netwerk": operator or "Onbekend",
+            "kW": round(max_power) if max_power else None,
+            "Prijs": prijs, "label": f"≈€{prijs:.2f}", "Bron": "OCPI",
+            "live_vrij": vrij, "live_totaal": totaal,
+        })
+    return rijen
+
+
 def dedupe_palen(rijen):
     """Verwijdert dubbels (zelfde locatie) op afgeronde coordinaten."""
     gezien, uniek = set(), []
@@ -670,6 +867,22 @@ with tab2:
         lk4.link_button("🗺️ Chargemap — alle palen",
                         "https://chargemap.com/en-us/map", use_container_width=True)
 
+    # Grote, supersnelle clusterkaart met alle palen (Mapbox GL).
+    with st.expander("🗺️ Grote clusterkaart — alle palen (Mapbox, supersnel)",
+                     expanded=bool(mapbox_token and geojson_url)):
+        if mapbox_token and geojson_url:
+            render_clusterkaart(mapbox_token, geojson_url)
+            st.caption("Groen = beschikbaar · rood = bezet/laden. Klik op een "
+                       "cluster om in te zoomen, op een paal voor details.")
+        else:
+            st.info("Vul in de zijbalk je **Mapbox public token** en de "
+                    "**GeoJSON-URL** in om deze kaart te tonen. Het GeoJSON-"
+                    "bestand maak je met `fetch_charging_data.py` en commit je "
+                    "in je repo (gebruik de raw.githubusercontent.com-link).")
+
+    st.divider()
+    st.subheader("🔍 Zoekkaart & loggen (rond een locatie)")
+
     c1, c2 = st.columns([1, 2])
     stad = c1.selectbox("Kies een stad", list(STEDEN.keys()))
     lat, lon = STEDEN[stad]
@@ -692,19 +905,24 @@ with tab2:
         st.caption("Tip: voeg het pakket 'streamlit-geolocation' toe voor "
                    "'gebruik mijn locatie'.")
 
-    bron = st.radio("Databron", ["TomTom (snel)", "Alle bronnen (compleet, trager)",
-                                 "Open Charge Map", "OpenStreetMap", "Open data"],
-                    horizontal=True, index=0)
+    hoofdbron = st.radio("Databron", ["TomTom (snel)", "Alle bronnen (compleet)"],
+                         horizontal=True, index=0)
+    with st.expander("⚙️ Geavanceerd — één specifieke bron kiezen"):
+        losse_bron = st.selectbox(
+            "Losse bron (overschrijft de keuze hierboven)",
+            ["(geen)", "Open Charge Map", "OpenStreetMap", "Open data", "OCPI"],
+            help="Meestal niet nodig. Handig om één bron los te testen.")
+    bron = losse_bron if losse_bron != "(geen)" else hoofdbron
     straal_km = st.slider("Zoekstraal (km)", min_value=5, max_value=50,
                           value=25, step=5,
                           help="Groter = ruimer zoekgebied, maar iets trager laden.")
-    alle = bron == "Alle bronnen (compleet, trager)"
+    alle = bron == "Alle bronnen (compleet)"
     # Coordinaten grof afronden (~1 km): binnen die straal wordt de al opgehaalde
     # data hergebruikt i.p.v. bij elke locatieklik opnieuw alle bronnen te bevragen.
     qlat, qlon = round(lat, 2), round(lon, 2)
     straal_m = straal_km * 1000
 
-    ocm_rijen, osm_rijen, tt_rijen, od_rijen = [], [], [], []
+    ocm_rijen, osm_rijen, tt_rijen, od_rijen, ocpi_rijen = [], [], [], [], []
     if not st.session_state.get("kaart_laden"):
         st.info("👆 Kies je databron en zoekstraal, en klik op "
                 "'🔄 Laadpalen laden / vernieuwen' (of gebruik je locatie) om de "
@@ -736,16 +954,28 @@ with tab2:
                         haal_opendata_palen(opendata_url, qlat, qlon, straal_m), stad)
                 except Exception as e:
                     st.warning(f"Open data niet bereikbaar: {e}")
+            if alle or bron == "OCPI":
+                ocpi_locaties = []
+                for u in ocpi_urls:
+                    try:
+                        ocpi_locaties.extend(haal_ocpi_palen(u, ocpi_token))
+                    except Exception as e:
+                        st.warning(f"OCPI-feed niet bereikbaar ({u[:45]}…): {e}")
+                ocpi_rijen = ocpi_naar_rijen(
+                    ocpi_locaties, qlat, qlon, straal_m, stad)
 
     if (alle or bron == "TomTom (snel)") and not tomtom_api_key:
         st.info("Voeg een TomTom-sleutel toe (zijbalk of Secrets) voor de meest "
                 "complete, actuele palen zoals nieuwe Electra-snelladers.")
+    if bron == "OCPI" and not ocpi_urls:
+        st.info("Plak eerst één of meer OCPI locations-URLs in de zijbalk "
+                "(één per regel) om deze live bron te gebruiken.")
     if bron == "Open data" and not opendata_url:
         st.info("Plak eerst een OpenDataSoft records-URL in de zijbalk om deze "
                 "bron te gebruiken.")
 
     palen_df = pd.DataFrame(
-        dedupe_palen(ocm_rijen + osm_rijen + tt_rijen + od_rijen))
+        dedupe_palen(ocm_rijen + osm_rijen + tt_rijen + od_rijen + ocpi_rijen))
     if not palen_df.empty:
         totaal = len(palen_df)
         f1, f2 = st.columns([2, 1])
@@ -763,7 +993,7 @@ with tab2:
         st.caption(f"🔌 {len(palen_df)} van {totaal} palen getoond "
                    f"(Open Charge Map: {len(ocm_rijen)} · "
                    f"OpenStreetMap: {len(osm_rijen)} · TomTom: {len(tt_rijen)} · "
-                   f"Open data: {len(od_rijen)}). "
+                   f"Open data: {len(od_rijen)} · OCPI: {len(ocpi_rijen)}). "
                    f"Prijzen zijn een schatting o.b.v. jouw eigen tarieven.")
 
     if not palen_df.empty:
@@ -798,9 +1028,31 @@ with tab2:
             format_func=lambda i: opties.iloc[i])
         gekozen = palen_df.iloc[keuze_idx]
 
-        info1, info2 = st.columns(2)
+        info1, info2, info3 = st.columns(3)
         info1.metric("Geselecteerde paal", gekozen["Locatie"])
         info2.metric("Verwacht tarief", f"€ {gekozen['Prijs']:.2f}/kWh")
+
+        # Live vrij/bezet-status: OCPI levert het direct; TomTom via extra call.
+        live_totaal = gekozen.get("live_totaal")
+        avail_id = gekozen.get("avail_id")
+        if pd.notna(live_totaal) and live_totaal:
+            vrij = int(gekozen.get("live_vrij") or 0)
+            merk = "🟢" if vrij > 0 else "🔴"
+            info3.metric("Beschikbaar (live)", f"{merk} {vrij}/{int(live_totaal)}")
+        elif isinstance(avail_id, str) and avail_id and tomtom_api_key:
+            try:
+                beschikbaar, totaal_conn = vat_beschikbaarheid_samen(
+                    haal_tomtom_beschikbaarheid(avail_id, tomtom_api_key))
+                if totaal_conn:
+                    kleur = "🟢" if beschikbaar > 0 else "🔴"
+                    info3.metric("Beschikbaar (live)",
+                                 f"{kleur} {beschikbaar}/{totaal_conn}")
+                else:
+                    info3.metric("Beschikbaar (live)", "—")
+            except Exception:
+                info3.metric("Beschikbaar (live)", "n.v.t.")
+        else:
+            info3.metric("Beschikbaar (live)", "n.v.t.")
 
         # Universele Google Maps geo-link (Apple CarPlay / Android Auto)
         maps_url = (
