@@ -91,9 +91,50 @@ map.on('load',()=>{
 """
 
 
-def render_clusterkaart(token, geojson_url, hoogte=620):
-    """Toont de ingebedde Mapbox GL-clusterkaart in de app."""
-    html = MAPBOX_HTML.replace("__TOKEN__", token).replace("__GEOJSON__", geojson_url)
+# Tileset-variant: vector tiles voor continentschaal (heel Europa vloeiend).
+MAPBOX_TILESET_HTML = """
+<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<style>html,body{margin:0;height:100%}#map{position:absolute;inset:0}
+.mapboxgl-popup-content{font:13px system-ui}</style></head>
+<body><div id="map"></div><script>
+mapboxgl.accessToken='__TOKEN__';
+const map=new mapboxgl.Map({container:'map',style:'mapbox://styles/mapbox/light-v11',
+ center:[4.5,50.2],zoom:5});
+map.addControl(new mapboxgl.NavigationControl(),'top-right');
+map.addControl(new mapboxgl.GeolocateControl({positionOptions:{enableHighAccuracy:true},
+ trackUserLocation:true}),'top-right');
+map.on('load',()=>{
+ map.addSource('p',{type:'vector',url:'__TILESET__'});
+ map.addLayer({id:'heat',type:'heatmap',source:'p','source-layer':'__SRCLAYER__',
+  maxzoom:8,paint:{'heatmap-radius':['interpolate',['linear'],['zoom'],3,2,8,18],
+  'heatmap-opacity':['interpolate',['linear'],['zoom'],6,0.7,8,0]}});
+ map.addLayer({id:'pt',type:'circle',source:'p','source-layer':'__SRCLAYER__',
+  paint:{'circle-color':['get','kleur'],
+  'circle-radius':['interpolate',['linear'],['zoom'],5,2,10,5,14,7],
+  'circle-stroke-width':['interpolate',['linear'],['zoom'],9,0,11,1],
+  'circle-stroke-color':'#fff'}});
+ map.on('click','pt',e=>{const p=e.features[0].properties;
+  new mapboxgl.Popup().setLngLat(e.lngLat).setHTML('<b>'+(p.naam||'Laadlocatie')+
+   '</b><br>'+(p.adres||'')+'<br>Status: <b>'+p.status+'</b><br>Vrij: '+
+   p.beschikbaar+'/'+p.totaal+(p.max_kw?' · '+p.max_kw+' kW':'')).addTo(map);});
+ map.on('mouseenter','pt',()=>map.getCanvas().style.cursor='pointer');
+ map.on('mouseleave','pt',()=>map.getCanvas().style.cursor='');
+});
+</script></body></html>
+"""
+
+
+def render_clusterkaart(token, geojson_url, tileset, source_layer, hoogte=620):
+    """Toont de ingebedde Mapbox-kaart: vector-tileset als die is ingesteld,
+    anders de geclusterde GeoJSON-kaart."""
+    if tileset and source_layer:
+        html = (MAPBOX_TILESET_HTML.replace("__TOKEN__", token)
+                .replace("__TILESET__", tileset).replace("__SRCLAYER__", source_layer))
+    else:
+        html = MAPBOX_HTML.replace("__TOKEN__", token).replace("__GEOJSON__",
+                                                               geojson_url)
     components.html(html, height=hoogte)
 
 
@@ -251,7 +292,15 @@ geojson_url = st.sidebar.text_input(
     "GeoJSON-URL (charging_stations.geojson)",
     value=_secret("mapbox", "geojson_url"),
     help="URL naar het door fetch_charging_data.py gemaakte GeoJSON-bestand, "
-         "bv. de raw.githubusercontent.com-link in je repo.")
+         "bv. de raw.githubusercontent.com-link in je repo. (Voor kleinere sets.)")
+mapbox_tileset = st.sidebar.text_input(
+    "Mapbox tileset-URL (mapbox://user.id)", value=_secret("mapbox", "tileset"),
+    help="Voor continentschaal (heel Europa). Krijg je na het uploaden van je "
+         "GeoJSON als tileset in Mapbox Studio. Overschrijft de GeoJSON-URL.")
+mapbox_source_layer = st.sidebar.text_input(
+    "Mapbox source-layer", value=_secret("mapbox", "source_layer"),
+    help="Naam van de 'source layer' in je tileset (staat in Mapbox Studio, "
+         "vaak de bestandsnaam zoals 'charging_stations').")
 
 
 def radius_prijs_incl_btw():
@@ -868,17 +917,25 @@ with tab2:
                         "https://chargemap.com/en-us/map", use_container_width=True)
 
     # Grote, supersnelle clusterkaart met alle palen (Mapbox GL).
-    with st.expander("🗺️ Grote clusterkaart — alle palen (Mapbox, supersnel)",
-                     expanded=bool(mapbox_token and geojson_url)):
-        if mapbox_token and geojson_url:
-            render_clusterkaart(mapbox_token, geojson_url)
-            st.caption("Groen = beschikbaar · rood = bezet/laden. Klik op een "
-                       "cluster om in te zoomen, op een paal voor details.")
+    heeft_tileset = bool(mapbox_tileset and mapbox_source_layer)
+    heeft_kaart = bool(mapbox_token and (heeft_tileset or geojson_url))
+    with st.expander("🗺️ Grote kaart — alle palen (Mapbox, supersnel)",
+                     expanded=heeft_kaart):
+        if heeft_kaart:
+            render_clusterkaart(mapbox_token, geojson_url, mapbox_tileset,
+                                mapbox_source_layer)
+            st.caption("Groen = beschikbaar · rood = bezet/laden · blauw = "
+                       "locatie (geen live status). "
+                       + ("Vector-tileset (heel Europa): zoom/scrol vrij."
+                          if heeft_tileset else
+                          "Klik op een cluster om in te zoomen, op een paal "
+                          "voor details."))
         else:
-            st.info("Vul in de zijbalk je **Mapbox public token** en de "
-                    "**GeoJSON-URL** in om deze kaart te tonen. Het GeoJSON-"
-                    "bestand maak je met `fetch_charging_data.py` en commit je "
-                    "in je repo (gebruik de raw.githubusercontent.com-link).")
+            st.info("Vul in de zijbalk je **Mapbox public token** in, plus óf "
+                    "een **tileset** (heel Europa) óf een **GeoJSON-URL** "
+                    "(kleinere set). Het GeoJSON maak je met "
+                    "`fetch_charging_data.py`; voor de tileset upload je dat "
+                    "bestand in Mapbox Studio.")
 
     st.divider()
     st.subheader("🔍 Zoekkaart & loggen (rond een locatie)")
