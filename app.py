@@ -51,18 +51,18 @@ st.set_page_config(page_title="EV-Laadbeheer BYD Sealion 7",
 # Data komt uit een vooraf gemaakt GeoJSON (fetch_charging_data.py), zodat de
 # server licht blijft en het clusteren in de browser gebeurt.
 # ---------------------------------------------------------------------------
-MAPBOX_HTML = """
+MAPLIBRE_HTML = """
 <!DOCTYPE html><html><head><meta charset="utf-8"/>
-<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet"/>
-<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <style>html,body{margin:0;height:100%}#map{position:absolute;inset:0}
-.mapboxgl-popup-content{font:13px system-ui}</style></head>
+.maplibregl-popup-content{font:13px system-ui}</style></head>
 <body><div id="map"></div><script>
-mapboxgl.accessToken='__TOKEN__';
-const map=new mapboxgl.Map({container:'map',style:'mapbox://styles/mapbox/light-v11',
- center:[4.7,51.0],zoom:6});
-map.addControl(new mapboxgl.NavigationControl(),'top-right');
-map.addControl(new mapboxgl.GeolocateControl({positionOptions:{enableHighAccuracy:true},
+const map=new maplibregl.Map({container:'map',
+ style:'https://tiles.openfreemap.org/styles/liberty',
+ center:[4.7,50.6],zoom:6});
+map.addControl(new maplibregl.NavigationControl(),'top-right');
+map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},
  trackUserLocation:true}),'top-right');
 map.on('load',()=>{
  map.addSource('p',{type:'geojson',data:'__GEOJSON__',cluster:true,
@@ -77,10 +77,10 @@ map.on('load',()=>{
   paint:{'circle-color':['get','kleur'],'circle-radius':7,
   'circle-stroke-width':1.5,'circle-stroke-color':'#fff'}});
  map.on('click','cl',e=>{const f=map.queryRenderedFeatures(e.point,{layers:['cl']});
-  map.getSource('p').getClusterExpansionZoom(f[0].properties.cluster_id,(er,z)=>{
-   if(er)return;map.easeTo({center:f[0].geometry.coordinates,zoom:z});});});
+  map.getSource('p').getClusterExpansionZoom(f[0].properties.cluster_id).then(z=>{
+   map.easeTo({center:f[0].geometry.coordinates,zoom:z});});});
  map.on('click','pt',e=>{const p=e.features[0].properties;
-  new mapboxgl.Popup().setLngLat(e.features[0].geometry.coordinates)
+  new maplibregl.Popup().setLngLat(e.features[0].geometry.coordinates)
    .setHTML('<b>'+(p.naam||'Laadlocatie')+'</b><br>'+(p.adres||'')+
     '<br>Status: <b>'+p.status+'</b><br>Vrij: '+p.beschikbaar+'/'+p.totaal+
     (p.max_kw?' · '+p.max_kw+' kW':'')).addTo(map);});
@@ -91,50 +91,9 @@ map.on('load',()=>{
 """
 
 
-# Tileset-variant: vector tiles voor continentschaal (heel Europa vloeiend).
-MAPBOX_TILESET_HTML = """
-<!DOCTYPE html><html><head><meta charset="utf-8"/>
-<link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet"/>
-<script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
-<style>html,body{margin:0;height:100%}#map{position:absolute;inset:0}
-.mapboxgl-popup-content{font:13px system-ui}</style></head>
-<body><div id="map"></div><script>
-mapboxgl.accessToken='__TOKEN__';
-const map=new mapboxgl.Map({container:'map',style:'mapbox://styles/mapbox/light-v11',
- center:[4.5,50.2],zoom:5});
-map.addControl(new mapboxgl.NavigationControl(),'top-right');
-map.addControl(new mapboxgl.GeolocateControl({positionOptions:{enableHighAccuracy:true},
- trackUserLocation:true}),'top-right');
-map.on('load',()=>{
- map.addSource('p',{type:'vector',url:'__TILESET__'});
- map.addLayer({id:'heat',type:'heatmap',source:'p','source-layer':'__SRCLAYER__',
-  maxzoom:8,paint:{'heatmap-radius':['interpolate',['linear'],['zoom'],3,2,8,18],
-  'heatmap-opacity':['interpolate',['linear'],['zoom'],6,0.7,8,0]}});
- map.addLayer({id:'pt',type:'circle',source:'p','source-layer':'__SRCLAYER__',
-  paint:{'circle-color':['get','kleur'],
-  'circle-radius':['interpolate',['linear'],['zoom'],5,2,10,5,14,7],
-  'circle-stroke-width':['interpolate',['linear'],['zoom'],9,0,11,1],
-  'circle-stroke-color':'#fff'}});
- map.on('click','pt',e=>{const p=e.features[0].properties;
-  new mapboxgl.Popup().setLngLat(e.lngLat).setHTML('<b>'+(p.naam||'Laadlocatie')+
-   '</b><br>'+(p.adres||'')+'<br>Status: <b>'+p.status+'</b><br>Vrij: '+
-   p.beschikbaar+'/'+p.totaal+(p.max_kw?' · '+p.max_kw+' kW':'')).addTo(map);});
- map.on('mouseenter','pt',()=>map.getCanvas().style.cursor='pointer');
- map.on('mouseleave','pt',()=>map.getCanvas().style.cursor='');
-});
-</script></body></html>
-"""
-
-
-def render_clusterkaart(token, geojson_url, tileset, source_layer, hoogte=620):
-    """Toont de ingebedde Mapbox-kaart: vector-tileset als die is ingesteld,
-    anders de geclusterde GeoJSON-kaart."""
-    if tileset and source_layer:
-        html = (MAPBOX_TILESET_HTML.replace("__TOKEN__", token)
-                .replace("__TILESET__", tileset).replace("__SRCLAYER__", source_layer))
-    else:
-        html = MAPBOX_HTML.replace("__TOKEN__", token).replace("__GEOJSON__",
-                                                               geojson_url)
+def render_clusterkaart(geojson_url, hoogte=620):
+    """Toont de ingebedde MapLibre-clusterkaart (gratis, geen account/token)."""
+    html = MAPLIBRE_HTML.replace("__GEOJSON__", geojson_url)
     components.html(html, height=hoogte)
 
 
@@ -283,24 +242,12 @@ ocpi_token = st.sidebar.text_input(
          "vrij toegankelijke JSON-links (dan wordt er geen sleutel meegestuurd).")
 
 st.sidebar.divider()
-st.sidebar.caption("🗺️ Grote clusterkaart (Mapbox)")
-mapbox_token = st.sidebar.text_input(
-    "Mapbox public token", type="password", value=_secret("mapbox", "token"),
-    help="Gratis public token (pk.…) via mapbox.com. Nodig voor de grote "
-         "clusterkaart met alle palen.")
+st.sidebar.caption("🗺️ Grote kaart (gratis, MapLibre)")
 geojson_url = st.sidebar.text_input(
     "GeoJSON-URL (charging_stations.geojson)",
-    value=_secret("mapbox", "geojson_url"),
-    help="URL naar het door fetch_charging_data.py gemaakte GeoJSON-bestand, "
-         "bv. de raw.githubusercontent.com-link in je repo. (Voor kleinere sets.)")
-mapbox_tileset = st.sidebar.text_input(
-    "Mapbox tileset-URL (mapbox://user.id)", value=_secret("mapbox", "tileset"),
-    help="Voor continentschaal (heel Europa). Krijg je na het uploaden van je "
-         "GeoJSON als tileset in Mapbox Studio. Overschrijft de GeoJSON-URL.")
-mapbox_source_layer = st.sidebar.text_input(
-    "Mapbox source-layer", value=_secret("mapbox", "source_layer"),
-    help="Naam van de 'source layer' in je tileset (staat in Mapbox Studio, "
-         "vaak de bestandsnaam zoals 'charging_stations').")
+    value=_secret("kaart", "geojson_url"),
+    help="URL naar het door de GitHub-Action gepubliceerde GeoJSON-bestand "
+         "(bv. de raw.githubusercontent.com-link op de 'data'-branch).")
 
 
 def radius_prijs_incl_btw():
@@ -916,26 +863,18 @@ with tab2:
         lk4.link_button("🗺️ Chargemap — alle palen",
                         "https://chargemap.com/en-us/map", use_container_width=True)
 
-    # Grote, supersnelle clusterkaart met alle palen (Mapbox GL).
-    heeft_tileset = bool(mapbox_tileset and mapbox_source_layer)
-    heeft_kaart = bool(mapbox_token and (heeft_tileset or geojson_url))
-    with st.expander("🗺️ Grote kaart — alle palen (Mapbox, supersnel)",
-                     expanded=heeft_kaart):
-        if heeft_kaart:
-            render_clusterkaart(mapbox_token, geojson_url, mapbox_tileset,
-                                mapbox_source_layer)
+    # Grote clusterkaart met alle palen (MapLibre — gratis, geen account).
+    with st.expander("🗺️ Grote kaart — alle palen (gratis, MapLibre)",
+                     expanded=bool(geojson_url)):
+        if geojson_url:
+            render_clusterkaart(geojson_url)
             st.caption("Groen = beschikbaar · rood = bezet/laden · blauw = "
-                       "locatie (geen live status). "
-                       + ("Vector-tileset (heel Europa): zoom/scrol vrij."
-                          if heeft_tileset else
-                          "Klik op een cluster om in te zoomen, op een paal "
-                          "voor details."))
+                       "locatie (geen live status). Klik op een cluster om in "
+                       "te zoomen, op een paal voor details.")
         else:
-            st.info("Vul in de zijbalk je **Mapbox public token** in, plus óf "
-                    "een **tileset** (heel Europa) óf een **GeoJSON-URL** "
-                    "(kleinere set). Het GeoJSON maak je met "
-                    "`fetch_charging_data.py`; voor de tileset upload je dat "
-                    "bestand in Mapbox Studio.")
+            st.info("Vul in de zijbalk de **GeoJSON-URL** in (de "
+                    "raw.githubusercontent.com-link van de 'data'-branch die de "
+                    "GitHub-Action publiceert). Geen Mapbox-account of token nodig.")
 
     st.divider()
     st.subheader("🔍 Zoekkaart & loggen (rond een locatie)")
