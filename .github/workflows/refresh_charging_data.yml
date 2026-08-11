@@ -2,8 +2,11 @@ name: Refresh charging data
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   refresh:
@@ -11,24 +14,25 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Installeer afhankelijkheden
-        run: pip install requests boto3
-
+        run: pip install requests
       - name: Haal laaddata op (alle bronnen)
         env:
           MONTA_CLIENT_ID: ${{ secrets.MONTA_CLIENT_ID }}
           MONTA_CLIENT_SECRET: ${{ secrets.MONTA_CLIENT_SECRET }}
           ENERGYVISION_API_KEY: ${{ secrets.ENERGYVISION_API_KEY }}
         run: python fetch_charging_data.py
-
-      - name: Upload naar Mapbox-tileset
-        env:
-          MAPBOX_USERNAME: ${{ secrets.MAPBOX_USERNAME }}
-          MAPBOX_SECRET_TOKEN: ${{ secrets.MAPBOX_SECRET_TOKEN }}
-          MAPBOX_TILESET_ID: charging_stations
-        run: python upload_to_mapbox.py
+      - name: Publiceer GeoJSON naar data-branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp charging_stations.geojson /tmp/charging_stations.geojson
+          git checkout --orphan data
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/charging_stations.geojson charging_stations.geojson
+          git add charging_stations.geojson
+          git commit -m "charging data update"
+          git push -f origin data
